@@ -13,7 +13,7 @@ var Parse = require('parse/node');
  * Convert $or queries into an array of where conditions
  */
 function flattenOrQueries(where) {
-  if (!where.hasOwnProperty('$or')) {
+  if (!Object.prototype.hasOwnProperty.call(where, '$or')) {
     return where;
   }
   var accum = [];
@@ -55,8 +55,8 @@ function queryHash(query) {
   if (query instanceof Parse.Query) {
     query = {
       className: query.className,
-      where: query._where
-    }
+      where: query._where,
+    };
   }
   var where = flattenOrQueries(query.where || {});
   var columns = [];
@@ -90,6 +90,24 @@ function queryHash(query) {
 }
 
 /**
+ * contains -- Determines if an object is contained in a list with special handling for Parse pointers.
+ */
+function contains(haystack: Array, needle: any): boolean {
+  if (needle && needle.__type && needle.__type === 'Pointer') {
+    for (const i in haystack) {
+      const ptr = haystack[i];
+      if (typeof ptr === 'string' && ptr === needle.objectId) {
+        return true;
+      }
+      if (ptr.className === needle.className && ptr.objectId === needle.objectId) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return haystack.indexOf(needle) > -1;
+}
+/**
  * matchesQuery -- Determines if an object would be returned by a Parse Query
  * It's a lightweight, where-clause only implementation of a full query engine.
  * Since we find queries that match objects, rather than objects that match
@@ -97,8 +115,7 @@ function queryHash(query) {
  */
 function matchesQuery(object: any, query: any): boolean {
   if (query instanceof Parse.Query) {
-    var className =
-      (object.id instanceof Id) ? object.id.className : object.className;
+    var className = object.id instanceof Id ? object.id.className : object.className;
     if (className !== query.className) {
       return false;
     }
@@ -112,6 +129,18 @@ function matchesQuery(object: any, query: any): boolean {
   return true;
 }
 
+function equalObjectsGeneric(obj, compareTo, eqlFn) {
+  if (Array.isArray(obj)) {
+    for (var i = 0; i < obj.length; i++) {
+      if (eqlFn(obj[i], compareTo)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  return eqlFn(obj, compareTo);
+}
 
 /**
  * Determines whether an object matches a single key's constraints
@@ -119,6 +148,13 @@ function matchesQuery(object: any, query: any): boolean {
 function matchesKeyConstraints(object, key, constraints) {
   if (constraints === null) {
     return false;
+  }
+  if (key.indexOf('.') >= 0) {
+    // Key references a subobject
+    var keyComponents = key.split('.');
+    var subObjectKey = keyComponents[0];
+    var keyRemainder = keyComponents.slice(1).join('.');
+    return matchesKeyConstraints(object[subObjectKey] || {}, keyRemainder, constraints);
   }
   var i;
   if (key === '$or') {
@@ -133,6 +169,10 @@ function matchesKeyConstraints(object, key, constraints) {
     // Bail! We can't handle relational queries locally
     return false;
   }
+  // Decode Date JSON value
+  if (object[key] && object[key].__type == 'Date') {
+    object[key] = new Date(object[key].iso);
+  }
   // Equality (or Array contains) cases
   if (typeof constraints !== 'object') {
     if (Array.isArray(object[key])) {
@@ -143,22 +183,16 @@ function matchesKeyConstraints(object, key, constraints) {
   var compareTo;
   if (constraints.__type) {
     if (constraints.__type === 'Pointer') {
-      return (
-        typeof object[key] !== 'undefined' &&
-        constraints.className === object[key].className &&
-        constraints.objectId === object[key].objectId
-      );
+      return equalObjectsGeneric(object[key], constraints, function (obj, ptr) {
+        return (
+          typeof obj !== 'undefined' &&
+          ptr.className === obj.className &&
+          ptr.objectId === obj.objectId
+        );
+      });
     }
-    compareTo = Parse._decode(key, constraints);
-    if (Array.isArray(object[key])) {
-      for (i = 0; i < object[key].length; i++) {
-        if (equalObjects(object[key][i], compareTo)) {
-          return true;
-        }
-      }
-      return false;
-    }
-    return equalObjects(object[key], compareTo);
+
+    return equalObjectsGeneric(object[key], Parse._decode(key, constraints), equalObjects);
   }
   // More complex cases
   for (var condition in constraints) {
@@ -193,12 +227,12 @@ function matchesKeyConstraints(object, key, constraints) {
         }
         break;
       case '$in':
-        if (compareTo.indexOf(object[key]) < 0) {
+        if (!contains(compareTo, object[key])) {
           return false;
         }
         break;
       case '$nin':
-        if (compareTo.indexOf(object[key]) > -1) {
+        if (contains(compareTo, object[key])) {
           return false;
         }
         break;
@@ -209,9 +243,9 @@ function matchesKeyConstraints(object, key, constraints) {
           }
         }
         break;
-      case '$exists':
-        let propertyExists = typeof object[key] !== 'undefined';
-        let existenceIsRequired = constraints['$exists'];
+      case '$exists': {
+        const propertyExists = typeof object[key] !== 'undefined';
+        const existenceIsRequired = constraints['$exists'];
         if (typeof constraints['$exists'] !== 'boolean') {
           // The SDK will never submit a non-boolean for $exists, but if someone
           // tries to submit a non-boolean for $exits outside the SDKs, just ignore it.
@@ -221,6 +255,7 @@ function matchesKeyConstraints(object, key, constraints) {
           return false;
         }
         break;
+      }
       case '$regex':
         if (typeof compareTo === 'object') {
           return compareTo.test(object[key]);
@@ -234,8 +269,10 @@ function matchesKeyConstraints(object, key, constraints) {
           expString += compareTo.substring(escapeEnd + 2, escapeStart);
           escapeEnd = compareTo.indexOf('\\E', escapeStart);
           if (escapeEnd > -1) {
-            expString += compareTo.substring(escapeStart + 2, escapeEnd)
-              .replace(/\\\\\\\\E/g, '\\E').replace(/\W/g, '\\$&');
+            expString += compareTo
+              .substring(escapeStart + 2, escapeEnd)
+              .replace(/\\\\\\\\E/g, '\\E')
+              .replace(/\W/g, '\\$&');
           }
 
           escapeStart = compareTo.indexOf('\\Q', escapeEnd);
@@ -247,14 +284,19 @@ function matchesKeyConstraints(object, key, constraints) {
         }
         break;
       case '$nearSphere':
+        if (!compareTo || !object[key]) {
+          return false;
+        }
         var distance = compareTo.radiansTo(object[key]);
         var max = constraints.$maxDistance || Infinity;
         return distance <= max;
       case '$within':
+        if (!compareTo || !object[key]) {
+          return false;
+        }
         var southWest = compareTo.$box[0];
         var northEast = compareTo.$box[1];
-        if (southWest.latitude > northEast.latitude ||
-            southWest.longitude > northEast.longitude) {
+        if (southWest.latitude > northEast.latitude || southWest.longitude > northEast.longitude) {
           // Invalid box, crosses the date line
           return false;
         }
@@ -285,7 +327,7 @@ function matchesKeyConstraints(object, key, constraints) {
 
 var QueryTools = {
   queryHash: queryHash,
-  matchesQuery: matchesQuery
+  matchesQuery: matchesQuery,
 };
 
 module.exports = QueryTools;

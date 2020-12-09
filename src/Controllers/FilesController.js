@@ -1,44 +1,53 @@
 // FilesController.js
-import { Parse } from 'parse/node';
 import { randomHexString } from '../cryptoUtils';
 import AdaptableController from './AdaptableController';
-import { FilesAdapter } from '../Adapters/Files/FilesAdapter';
-import path  from 'path';
+import { validateFilename, FilesAdapter } from '../Adapters/Files/FilesAdapter';
+import path from 'path';
 import mime from 'mime';
+const Parse = require('parse').Parse;
 
-const legacyFilesRegex = new RegExp("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-.*");
+const legacyFilesRegex = new RegExp(
+  '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-.*'
+);
 
 export class FilesController extends AdaptableController {
-
   getFileData(config, filename) {
     return this.adapter.getFileData(filename);
   }
 
-  createFile(config, filename, data, contentType) {
-
-    let extname = path.extname(filename);
+  createFile(config, filename, data, contentType, options) {
+    const extname = path.extname(filename);
 
     const hasExtension = extname.length > 0;
 
-    if (!hasExtension && contentType && mime.extension(contentType)) {
-      filename = filename + '.' + mime.extension(contentType);
+    if (!hasExtension && contentType && mime.getExtension(contentType)) {
+      filename = filename + '.' + mime.getExtension(contentType);
     } else if (hasExtension && !contentType) {
-      contentType = mime.lookup(filename);
+      contentType = mime.getType(filename);
     }
 
-    filename = randomHexString(32) + '_' + filename;
+    if (!this.options.preserveFileName) {
+      filename = randomHexString(32) + '_' + filename;
+    }
 
-    var location = this.adapter.getFileLocation(config, filename);
-    return this.adapter.createFile(filename, data, contentType).then(() => {
+    const location = this.adapter.getFileLocation(config, filename);
+    return this.adapter.createFile(filename, data, contentType, options).then(() => {
       return Promise.resolve({
         url: location,
-        name: filename
+        name: filename,
       });
     });
   }
 
   deleteFile(config, filename) {
     return this.adapter.deleteFile(filename);
+  }
+
+  getMetadata(filename) {
+    if (typeof this.adapter.getMetadata === 'function') {
+      return this.adapter.getMetadata(filename);
+    }
+    return Promise.resolve({});
   }
 
   /**
@@ -48,19 +57,19 @@ export class FilesController extends AdaptableController {
    */
   expandFilesInObject(config, object) {
     if (object instanceof Array) {
-      object.map((obj) => this.expandFilesInObject(config, obj));
+      object.map(obj => this.expandFilesInObject(config, obj));
       return;
     }
     if (typeof object !== 'object') {
       return;
     }
-    for (let key in object) {
-      let fileObject = object[key];
+    for (const key in object) {
+      const fileObject = object[key];
       if (fileObject && fileObject['__type'] === 'File') {
         if (fileObject['url']) {
           continue;
         }
-        let filename = fileObject['name'];
+        const filename = fileObject['name'];
         // all filenames starting with "tfss-" should be from files.parsetfss.com
         // all filenames starting with a "-" seperated UUID should be from files.parse.com
         // all other filenames have been migrated or created from Parse Server
@@ -68,9 +77,11 @@ export class FilesController extends AdaptableController {
           fileObject['url'] = this.adapter.getFileLocation(config, filename);
         } else {
           if (filename.indexOf('tfss-') === 0) {
-            fileObject['url'] = 'http://files.parsetfss.com/' + config.fileKey + '/' + encodeURIComponent(filename);
+            fileObject['url'] =
+              'http://files.parsetfss.com/' + config.fileKey + '/' + encodeURIComponent(filename);
           } else if (legacyFilesRegex.test(filename)) {
-            fileObject['url'] = 'http://files.parse.com/' + config.fileKey + '/' + encodeURIComponent(filename);
+            fileObject['url'] =
+              'http://files.parse.com/' + config.fileKey + '/' + encodeURIComponent(filename);
           } else {
             fileObject['url'] = this.adapter.getFileLocation(config, filename);
           }
@@ -83,9 +94,20 @@ export class FilesController extends AdaptableController {
     return FilesAdapter;
   }
 
-  getFileStream(config, filename) {
-    return this.adapter.getFileStream(filename);
-   }
+  handleFileStream(config, filename, req, res, contentType) {
+    return this.adapter.handleFileStream(filename, req, res, contentType);
+  }
+
+  validateFilename(filename) {
+    if (typeof this.adapter.validateFilename === 'function') {
+      const error = this.adapter.validateFilename(filename);
+      if (typeof error !== 'string') {
+        return error;
+      }
+      return new Parse.Error(Parse.Error.INVALID_FILE_NAME, error);
+    }
+    return validateFilename(filename);
+  }
 }
 
 export default FilesController;

@@ -1,22 +1,15 @@
-import path from 'path';
-import express from 'express';
-import { ParseServer } from '../index';
-import definitions from './cli-definitions';
-import program from './utils/commander';
-import { mergeWithOptions } from './utils/commander';
+/* eslint-disable no-console */
+import ParseServer from '../index';
+import definitions from './definitions/parse-server';
 import cluster from 'cluster';
 import os from 'os';
+import runner from './utils/runner';
 
-program.loadDefinitions(definitions);
-
-program
-  .usage('[options] <path/to/configuration.json>');
-
-program.on('--help', function(){
+const help = function () {
   console.log('  Get Started guide:');
   console.log('');
-  console.log('    Please have a look at the get started guide!')
-  console.log('    https://github.com/ParsePlatform/parse-server/wiki/Parse-Server-Guide');
+  console.log('    Please have a look at the get started guide!');
+  console.log('    http://docs.parseplatform.org/parse-server/guide/');
   console.log('');
   console.log('');
   console.log('  Usage with npm start');
@@ -32,72 +25,83 @@ program.on('--help', function(){
   console.log('    $ parse-server -- --appId APP_ID --masterKey MASTER_KEY --serverURL serverURL');
   console.log('    $ parse-server -- --appId APP_ID --masterKey MASTER_KEY --serverURL serverURL');
   console.log('');
+};
+
+runner({
+  definitions,
+  help,
+  usage: '[options] <path/to/configuration.json>',
+  start: function (program, options, logOptions) {
+    if (!options.appId || !options.masterKey) {
+      program.outputHelp();
+      console.error('');
+      console.error('\u001b[31mERROR: appId and masterKey are required\u001b[0m');
+      console.error('');
+      process.exit(1);
+    }
+
+    if (options['liveQuery.classNames']) {
+      options.liveQuery = options.liveQuery || {};
+      options.liveQuery.classNames = options['liveQuery.classNames'];
+      delete options['liveQuery.classNames'];
+    }
+    if (options['liveQuery.redisURL']) {
+      options.liveQuery = options.liveQuery || {};
+      options.liveQuery.redisURL = options['liveQuery.redisURL'];
+      delete options['liveQuery.redisURL'];
+    }
+    if (options['liveQuery.redisOptions']) {
+      options.liveQuery = options.liveQuery || {};
+      options.liveQuery.redisOptions = options['liveQuery.redisOptions'];
+      delete options['liveQuery.redisOptions'];
+    }
+
+    if (options.cluster) {
+      const numCPUs = typeof options.cluster === 'number' ? options.cluster : os.cpus().length;
+      if (cluster.isMaster) {
+        logOptions();
+        for (let i = 0; i < numCPUs; i++) {
+          cluster.fork();
+        }
+        cluster.on('exit', (worker, code) => {
+          console.log(`worker ${worker.process.pid} died (${code})... Restarting`);
+          cluster.fork();
+        });
+      } else {
+        ParseServer.start(options, () => {
+          printSuccessMessage();
+        });
+      }
+    } else {
+      ParseServer.start(options, () => {
+        logOptions();
+        console.log('');
+        printSuccessMessage();
+      });
+    }
+
+    function printSuccessMessage() {
+      console.log('[' + process.pid + '] parse-server running on ' + options.serverURL);
+      if (options.mountGraphQL) {
+        console.log(
+          '[' +
+            process.pid +
+            '] GraphQL running on http://localhost:' +
+            options.port +
+            options.graphQLPath
+        );
+      }
+      if (options.mountPlayground) {
+        console.log(
+          '[' +
+            process.pid +
+            '] Playground running on http://localhost:' +
+            options.port +
+            options.playgroundPath
+        );
+      }
+    }
+  },
 });
 
-program.parse(process.argv, process.env);
-
-let options = program.getOptions();
-
-if (!options.serverURL) {
-  options.serverURL = `http://localhost:${options.port}${options.mountPath}`;
-}
-
-if (!options.appId || !options.masterKey || !options.serverURL) {
-  program.outputHelp();
-  console.error("");
-  console.error('\u001b[31mERROR: appId and masterKey are required\u001b[0m');
-  console.error("");
-  process.exit(1);
-}
-
-function logStartupOptions(options) {
-  for (let key in options) {
-    let value = options[key];
-    if (key == "masterKey") {
-      value = "***REDACTED***";
-    }
-    console.log(`${key}: ${value}`);
-  }
-}
-
-function startServer(options, callback) {
-  const app = express();
-  const api = new ParseServer(options);
-  app.use(options.mountPath, api);
-
-  var server = app.listen(options.port, callback);
-
-  var handleShutdown = function() {
-    console.log('Termination signal received. Shutting down.');
-    server.close(function () {
-      process.exit(0);
-    });
-  };
-  process.on('SIGTERM', handleShutdown);
-  process.on('SIGINT', handleShutdown);
-}
-
-if (options.cluster) {
-  const numCPUs = typeof options.cluster === 'number' ? options.cluster : os.cpus().length;
-  if (cluster.isMaster) {
-    logStartupOptions(options);
-    for(var i = 0; i < numCPUs; i++) {
-      cluster.fork();
-    }
-    cluster.on('exit', (worker, code, signal) => {
-      console.log(`worker ${worker.process.pid} died... Restarting`);
-      cluster.fork();
-    });
-  } else {
-    startServer(options, () => {
-      console.log('['+process.pid+'] parse-server running on '+options.serverURL);
-    });
-  }
-} else {
-  startServer(options, () => {
-    logStartupOptions(options);
-    console.log('');
-    console.log('['+process.pid+'] parse-server running on '+options.serverURL);
-  });
-}
-
+/* eslint-enable no-console */
